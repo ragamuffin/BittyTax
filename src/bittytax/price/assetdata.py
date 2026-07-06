@@ -176,23 +176,45 @@ class AssetData:
                 all_assets.append(asset_data)
         return all_assets
 
-    def get_historic_btc_price(self, date: Timestamp) -> "AsPriceRecord":
-        btc_priority = (
-            [ds.split(":")[0] for ds in config.data_source_select[AssetSymbol("BTC")]]
-            if AssetSymbol("BTC") in config.data_source_select
-            else config.data_source_crypto
+    def get_historic_fiat_bridge_price(self, base: QuoteSymbol, date: Timestamp) -> "AsPriceRecord":
+        # 'base' is the intermediate quote currency (e.g. BTC, USD or USDT) used by a data
+        # source that doesn't support config.ccy directly. USDT is treated as pegged to USD.
+        if base == "USDT":
+            # USDT is pegged 1:1 to USD, just return USD price
+            base = QuoteSymbol("USD")
+
+        fiat_base = AssetSymbol(base)
+        if base == config.ccy:
+            # No conversion needed (e.g. USD/USD), return 1.0
+            return AsPriceRecord(
+                symbol=fiat_base,
+                name=AssetName("United States Dollar" if base == "USD" else base),
+                data_source=DataSourceName(""),
+                asset_id=AssetId(""),
+                price=Decimal("1.0"),
+                quote=config.ccy,
+            )
+
+        priority = (
+            [ds.split(":")[0] for ds in config.data_source_select[fiat_base]]
+            if fiat_base in config.data_source_select
+            else (
+                config.data_source_fiat
+                if fiat_base in config.fiat_list
+                else config.data_source_crypto
+            )
         )
-        for data_source in btc_priority:
+        for data_source in priority:
             ds_key = data_source.upper()
             if ds_key not in self.data_sources:
                 continue
             ds_obj = self.data_sources[ds_key]
-            if AssetSymbol("BTC") not in ds_obj.assets:
+            if fiat_base not in ds_obj.assets:
                 continue
             if config.ccy not in type(ds_obj).HISTORICAL_QUOTES:
                 continue
-            pair = TradingPair("BTC/" + config.ccy)
-            asset_id = ds_obj.assets[AssetSymbol("BTC")]["asset_id"]
+            pair = TradingPair(fiat_base + "/" + config.ccy)
+            asset_id = ds_obj.assets[fiat_base]["asset_id"]
             date_key = Date(date.date())
             if not self.no_cache:
                 if (
@@ -203,14 +225,14 @@ class AssetData:
                     cached = ds_obj.prices[pair][asset_id][date_key]["price"]
                     if cached is not None:
                         return AsPriceRecord(
-                            symbol=AssetSymbol("BTC"),
-                            name=ds_obj.assets[AssetSymbol("BTC")]["name"],
+                            symbol=fiat_base,
+                            name=ds_obj.assets[fiat_base]["name"],
                             data_source=ds_obj.name(),
                             asset_id=asset_id,
                             price=cached,
                             quote=config.ccy,
                         )
-            ds_obj.get_historical(AssetSymbol("BTC"), config.ccy, date, asset_id)
+            ds_obj.get_historical(fiat_base, config.ccy, date, asset_id)
             if (
                 pair in ds_obj.prices
                 and asset_id in ds_obj.prices[pair]
@@ -219,14 +241,14 @@ class AssetData:
                 fetched = ds_obj.prices[pair][asset_id][date_key]["price"]
                 if fetched is not None:
                     return AsPriceRecord(
-                        symbol=AssetSymbol("BTC"),
-                        name=ds_obj.assets[AssetSymbol("BTC")]["name"],
+                        symbol=fiat_base,
+                        name=ds_obj.assets[fiat_base]["name"],
                         data_source=ds_obj.name(),
                         asset_id=asset_id,
                         price=fetched,
                         quote=config.ccy,
                     )
-        raise RuntimeError("BTC price is not available")
+        raise RuntimeError(f"{fiat_base} price is not available")
 
     def get_historic_price_ds(
         self,
@@ -241,14 +263,24 @@ class AssetData:
 
         all_assets = []
         for ds in data_sources:
-            has_direct = config.ccy in type(self.data_sources[ds]).HISTORICAL_QUOTES
-            has_btc = req_symbol != "BTC" and "BTC" in type(self.data_sources[ds]).HISTORICAL_QUOTES
+            ds_quotes = type(self.data_sources[ds]).HISTORICAL_QUOTES
+            has_direct = config.ccy in ds_quotes
+            has_btc = req_symbol != "BTC" and "BTC" in ds_quotes
+            usd_bridge_quote = None
+            # Set USD/USDT bridge as a fallback even if direct is available,
+            # since the direct quote might not have an actual trading pair (e.g. XLMUSD vs XLMUSDT)
+            if "USDT" in ds_quotes:
+                usd_bridge_quote = QuoteSymbol("USDT")
+            elif "USD" in ds_quotes:
+                usd_bridge_quote = QuoteSymbol("USD")
 
             if config.price_via_btc:
                 if has_btc:
                     quote = QuoteSymbol("BTC")
                 elif has_direct:
                     quote = config.ccy
+                elif usd_bridge_quote:
+                    quote = usd_bridge_quote
                 else:
                     continue
             else:
@@ -256,10 +288,29 @@ class AssetData:
                     quote = config.ccy
                 elif has_btc:
                     quote = QuoteSymbol("BTC")
+                elif usd_bridge_quote:
+                    quote = usd_bridge_quote
                 else:
                     continue
 
-            for asset_id in self.data_sources[ds].get_list().get(req_symbol, []):
+            # Validate that the selected quote actually has a trading pair for this asset
+            # (e.g. Binance advertises BTC support but doesn't have XLMBTC)
+            if hasattr(self.data_sources[ds], "_find_symbol"):
+                if not self.data_sources[ds]._find_symbol(req_symbol, quote):
+                    if usd_bridge_quote and quote != usd_bridge_quote:
+                        quote = usd_bridge_quote
+                    else:
+                        continue
+
+            # Filter asset_id entries to only include those matching the selected quote
+            # (e.g. for XLM with quote USDT, only use XLMUSDT, not XLMETH)
+            asset_ids = [
+                aid
+                for aid in self.data_sources[ds].get_list().get(req_symbol, [])
+                if aid["asset_id"].endswith(quote)
+            ]
+
+            for asset_id in asset_ids:
                 asset_data = cast(AsPriceRecord, asset_id)
                 asset_data["symbol"] = req_symbol
                 asset_data["data_source"] = self.data_sources[ds].name()

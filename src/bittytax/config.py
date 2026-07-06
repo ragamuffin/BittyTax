@@ -34,7 +34,7 @@ class Config:
     TRADE_ALLOWABLE_COST_SPLIT = 2
 
     DATA_SOURCE_FIAT = ["BittyTaxAPI"]
-    DATA_SOURCE_CRYPTO = ["CoinGecko", "CoinPaprika"]
+    DATA_SOURCE_CRYPTO = ["CoinGecko", "CoinPaprika", "Binance"]
 
     DEFAULT_CONFIG = {
         "local_currency": "GBP",

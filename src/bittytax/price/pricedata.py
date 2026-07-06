@@ -122,6 +122,9 @@ class PriceData:
                         )
 
                 ds_obj.get_historical(asset, quote, timestamp)
+                # asset_id may have been updated by get_historical (e.g. Binance uses a
+                # quote-specific trading pair symbol), re-read it before checking the cache
+                asset_id = ds_obj.assets[asset]["asset_id"]
                 if (
                     pair in ds_obj.prices
                     and asset_id in ds_obj.prices[pair]
@@ -162,6 +165,20 @@ class PriceData:
 
         return PriceDataRecord(name=name, data_source=DataSourceName(""))
 
+    @staticmethod
+    def _usd_bridge_quote(
+        ds: DataSourceBase, asset: AssetSymbol, quote: QuoteSymbol, has_direct: bool, has_btc: bool
+    ) -> Optional[QuoteSymbol]:
+        # Fallback for data sources (e.g. Binance) that only quote in USD/USDT, by
+        # converting via a USD fiat exchange rate for currencies they don't support directly.
+        if has_direct or has_btc or quote == "USD" or asset == AssetSymbol("USD"):
+            return None
+        if "USDT" in type(ds).HISTORICAL_QUOTES:
+            return QuoteSymbol("USDT")
+        if "USD" in type(ds).HISTORICAL_QUOTES:
+            return QuoteSymbol("USD")
+        return None
+
     def get_historical(
         self, asset: AssetSymbol, quote: QuoteSymbol, timestamp: Timestamp
     ) -> PriceDataRecord:
@@ -170,6 +187,7 @@ class PriceData:
             ds = self.data_sources[data_source.upper()]
             has_direct = quote in type(ds).HISTORICAL_QUOTES
             has_btc = asset != AssetSymbol("BTC") and "BTC" in type(ds).HISTORICAL_QUOTES
+            usd_bridge_quote = self._usd_bridge_quote(ds, asset, quote, has_direct, has_btc)
 
             if config.price_via_btc:
                 if has_btc:
@@ -221,6 +239,30 @@ class PriceData:
                         return PriceDataRecord(
                             name=name, data_source=ds.name(), url=url, price_ccy=price
                         )
+                elif usd_bridge_quote:
+                    price_usd, name, url = self.get_historical_ds(
+                        data_source, asset, usd_bridge_quote, timestamp
+                    )
+                    if price_usd is not None:
+                        usd_record = self.get_historical(AssetSymbol("USD"), quote, timestamp)
+                        if usd_record.price_ccy is not None:
+                            if config.debug:
+                                print(
+                                    f"{Fore.YELLOW}price: {timestamp:%Y-%m-%d}, 1 "
+                                    f"{asset}={price_usd.normalize():0,f} {usd_bridge_quote} via "
+                                    f"{ds.name()} ({name})"
+                                )
+                            if self.price_tool:
+                                print(
+                                    f"{Fore.YELLOW}1 {asset}={price_usd.normalize():0,f} "
+                                    f"{usd_bridge_quote} {Fore.CYAN}via {ds.name()} ({name})"
+                                )
+                            return PriceDataRecord(
+                                name=name,
+                                data_source=ds.name(),
+                                url=url,
+                                price_ccy=usd_record.price_ccy * price_usd,
+                            )
             else:
                 if has_direct:
                     price, name, url = self.get_historical_ds(data_source, asset, quote, timestamp)
@@ -271,5 +313,29 @@ class PriceData:
                             url=url,
                             price_btc=price_btc,
                         )
+                elif usd_bridge_quote:
+                    price_usd, name, url = self.get_historical_ds(
+                        data_source, asset, usd_bridge_quote, timestamp
+                    )
+                    if price_usd is not None:
+                        usd_record = self.get_historical(AssetSymbol("USD"), quote, timestamp)
+                        if usd_record.price_ccy is not None:
+                            if config.debug:
+                                print(
+                                    f"{Fore.YELLOW}price: {timestamp:%Y-%m-%d}, 1 "
+                                    f"{asset}={price_usd.normalize():0,f} {usd_bridge_quote} via "
+                                    f"{ds.name()} ({name})"
+                                )
+                            if self.price_tool:
+                                print(
+                                    f"{Fore.YELLOW}1 {asset}={price_usd.normalize():0,f} "
+                                    f"{usd_bridge_quote} {Fore.CYAN}via {ds.name()} ({name})"
+                                )
+                            return PriceDataRecord(
+                                name=name,
+                                data_source=ds.name(),
+                                url=url,
+                                price_ccy=usd_record.price_ccy * price_usd,
+                            )
 
         return PriceDataRecord(name=name, data_source=DataSourceName(""))

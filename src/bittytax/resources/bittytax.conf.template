@@ -69,8 +69,12 @@ data_source_fiat:
     ['BittyTaxAPI']
 
 # Which data source(s) to use for cryptoasset prices
+# Available: CoinGecko, CoinPaprika, Binance
+# Binance uses the public API (no API key required) with no historical data limit,
+#   but only supports USD/USDT/BTC quote currencies. GBP prices are obtained via
+#   the BTC intermediate path (price_via_btc) using BittyTaxAPI for BTC/GBP conversion.
 data_source_crypto:
-    ['CoinGecko', 'CoinPaprika']
+    ['CoinGecko', 'CoinPaprika', 'Binance']
 
 # Use BTC as an intermediate for historic prices (legacy method)
 price_via_btc: False

@@ -202,6 +202,12 @@ def main() -> None:
                             else config.data_source_crypto
                         )
                         ds_set |= {ds.upper() for ds in btc_priority}
+                    usd_priority = (
+                        [ds.split(":")[0] for ds in config.data_source_select[AssetSymbol("USD")]]
+                        if AssetSymbol("USD") in config.data_source_select
+                        else config.data_source_fiat
+                    )
+                    ds_set |= {ds.upper() for ds in usd_priority}
                     combined_ds = list(ds_set)
                 asset_data_obj = AssetData(
                     no_cache=args.no_cache, data_sources_required=combined_ds
@@ -212,21 +218,31 @@ def main() -> None:
                     )
                 else:
                     assets = asset_data_obj.get_latest_price_ds(symbol, args.datasource)
-                btc = None
+                bridge_cache: dict = {}
                 for asset_data in assets:
                     if asset_data["price"] is None:
                         continue
 
                     output_ds_price(asset_data)
                     price_ccy = None
-                    if asset_data["quote"] == "BTC":
-                        if btc is None:
+                    if asset_data["quote"] != config.ccy:
+                        bridge_quote = asset_data["quote"]
+                        if bridge_quote not in bridge_cache:
+                            bridge_cache[bridge_quote] = None
                             if args.command == CMD_HISTORY:
-                                btc = asset_data_obj.get_historic_btc_price(args.date)
+                                try:
+                                    bridge_cache[bridge_quote] = (
+                                        asset_data_obj.get_historic_fiat_bridge_price(
+                                            bridge_quote, args.date
+                                        )
+                                    )
+                                except RuntimeError:
+                                    bridge_cache[bridge_quote] = None
 
-                        if btc is not None and btc["price"] is not None:
-                            price_ccy = btc["price"] * asset_data["price"]
-                            output_ds_price(btc)
+                        bridge = bridge_cache[bridge_quote]
+                        if bridge is not None and bridge["price"] is not None:
+                            price_ccy = bridge["price"] * asset_data["price"]
+                            output_ds_price(bridge)
                     else:
                         price_ccy = asset_data["price"]
 

@@ -1158,3 +1158,115 @@ class CoinPaprika(DataSourceBase):
             },
             timestamp,
         )
+
+
+class Binance(DataSourceBase):
+    HISTORICAL_QUOTES = {"USD", "USDT", "BTC"}
+    LATEST_QUOTES = HISTORICAL_QUOTES
+
+    def __init__(self, no_cache: bool = False, progress_bar: Optional[tqdm] = None) -> None:
+        super().__init__(no_cache, progress_bar)
+        Binance.RATE_LIMIT = 10
+        self.api_root = "https://api.binance.com/api/v3"
+
+        cached_ids = self._load_ids()
+        if cached_ids is not None:
+            self.ids = cached_ids
+        else:
+            json_resp = self._get_json(f"{self.api_root}/exchangeInfo")
+
+            ids: Dict[AssetId, DsIdToAssetData] = {}
+            for s in json_resp.get("symbols", []):
+                if s.get("status") != "TRADING":
+                    continue
+                symbol = AssetSymbol(s["baseAsset"].strip().upper())
+                quote_asset = s["quoteAsset"].strip().upper()
+                asset_id = AssetId(s["symbol"].strip().upper())
+                if symbol not in ids:
+                    ids[asset_id] = DsIdToAssetData(
+                        symbol=symbol, name=AssetName(s["baseAsset"].strip())
+                    )
+
+            self.ids = ids
+            self._save_ids()
+
+        for k, v in self.ids.items():
+            if v["symbol"] not in self.assets:
+                self.assets[v["symbol"]] = {"asset_id": k, "name": v["name"]}
+
+        self._get_config_assets()
+        self._load_prices()
+
+    def _find_symbol(self, asset: AssetSymbol, quote: QuoteSymbol) -> Optional[str]:
+        # asset_id is always baseAsset + quoteAsset concatenated with no separator, so an
+        # exact match is required here (a substring/endswith match would incorrectly match
+        # e.g. quote "USD" against a pair quoted in "FDUSD", "TUSD" or "BUSD")
+        target = asset + quote
+        for asset_id, asset_data in self.ids.items():
+            if asset_data["symbol"] == asset and asset_id == target:
+                return asset_id
+        if quote == "USD":
+            # Most pairs are only quoted in USDT, treat USD/USDT as equivalent
+            return self._find_symbol(asset, QuoteSymbol("USDT"))
+        return None
+
+    def _sync_asset_id(self, asset: AssetSymbol, symbol: str) -> None:
+        # The default asset_id chosen at init may not be the pair actually used for a given
+        # quote, keep it in sync so cache lookups by callers use the correct key
+        if asset in self.assets:
+            self.assets[asset]["asset_id"] = AssetId(symbol)
+
+    def get_latest(
+        self, asset: AssetSymbol, quote: QuoteSymbol, _asset_id: AssetId = AssetId("")
+    ) -> Optional[Decimal]:
+        symbol = self._find_symbol(asset, quote)
+        if not symbol:
+            return None
+        self._sync_asset_id(asset, symbol)
+
+        json_resp = self._get_json(f"{self.api_root}/ticker/price?symbol={symbol}")
+        return Decimal(str(json_resp["price"])) if "price" in json_resp else None
+
+    def get_historical(
+        self,
+        asset: AssetSymbol,
+        quote: QuoteSymbol,
+        timestamp: Timestamp,
+        _asset_id: AssetId = AssetId(""),
+    ) -> None:
+        symbol = self._find_symbol(asset, quote)
+        if not symbol:
+            return
+        self._sync_asset_id(asset, symbol)
+
+        start_ms = int(timestamp.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        end_ms = start_ms + 86400000
+
+        url = (
+            f"{self.api_root}/klines?symbol={symbol}&interval=1d"
+            f"&startTime={start_ms}&endTime={end_ms}&limit=1"
+        )
+
+        json_resp = self._get_json(url)
+        pair = self.pair(asset, quote)
+        if json_resp:
+            for k in json_resp:
+                date = Date(datetime.fromtimestamp(k[0] / 1000, TZ_UTC).date())
+                self._update_prices(
+                    pair,
+                    AssetId(symbol),
+                    {
+                        date: {
+                            "price": Decimal(str(k[4])) if k[4] else None,
+                            "url": SourceUrl(url),
+                        }
+                    },
+                    timestamp,
+                )
+        else:
+            self._update_prices(
+                pair,
+                AssetId(symbol),
+                {Date(timestamp.date()): {"price": None, "url": SourceUrl(url)}},
+                timestamp,
+            )
